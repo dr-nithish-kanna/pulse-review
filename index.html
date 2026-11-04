@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Pulse Card Review</title>
+<style>
+:root { --bg:#f7f7f5; --panel:#fff; --ink:#1f2328; --muted:#5d6570; --line:#dcdfe3; --accent:#0b6b5b; --on-accent:#fff; --warn:#9a5b00; --warnbg:#fdf1dc; --evbg:#e8f3f0; --bad:#a3312a; }
+@media (prefers-color-scheme: dark) { :root { --bg:#16181b; --panel:#1f2226; --ink:#e7e9ec; --muted:#a2a9b2; --line:#33383e; --accent:#6fd0bd; --on-accent:#10211d; --warn:#f0bd6c; --warnbg:#3a2e18; --evbg:#1c302c; --bad:#f09a93; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
+main { max-width:680px; margin:0 auto; padding:16px 16px 96px; }
+h1 { font-size:20px; margin:0; }
+.bar { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
+.tabs { display:flex; gap:6px; margin-bottom:12px; }
+.tabs button { flex:1; min-height:44px; padding:6px 4px; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; }
+.tabs button[aria-pressed="true"] { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+article, .gate { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }
+.top { display:flex; flex-wrap:wrap; gap:8px; align-items:center; color:var(--muted); font-size:13px; }
+code { overflow-wrap:anywhere; }
+.badge { font-size:12px; padding:1px 8px; border-radius:999px; background:var(--warnbg); color:var(--warn); border:1px solid var(--warn); }
+.text { font-size:19px; margin:12px 0; }
+.meta { font-size:14px; color:var(--muted); }
+.note { background:var(--warnbg); color:var(--warn); padding:8px 12px; margin:12px 0; font-size:15px; }
+.evidence { background:var(--evbg); border-left:3px solid var(--accent); padding:8px 12px; margin:12px 0; font-size:15px; }
+.evidence.none { background:none; border-left-color:var(--line); color:var(--muted); }
+blockquote { margin:6px 0 0; font-style:italic; }
+img { display:block; width:100%; height:auto; margin-top:12px; border:1px solid var(--line); border-radius:4px; }
+.asmt { font-size:14px; border-top:1px solid var(--line); padding:8px 0; }
+.actions { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line); padding:10px 16px; }
+.actions div { display:flex; gap:8px; max-width:648px; margin:0 auto; }
+button { min-height:44px; }
+.actions button, .gate button { flex:1; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--ink); font:inherit; padding:8px; }
+.actions .primary, .gate button { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; }
+.link { background:none; border:none; color:var(--muted); font:inherit; font-size:14px; text-decoration:underline; padding:0 4px; }
+input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:6px; }
+.status { color:var(--muted); padding:12px 0; }
+.status.error { color:var(--bad); }
+[hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar"><h1>Pulse review</h1><button id="forget" class="link" hidden>Remove token</button></div>
+
+  <form id="gate" class="gate" hidden>
+    <label for="token">GitHub token</label>
+    <input id="token" type="password" autocomplete="off" required>
+    <button type="submit">Open cards</button>
+    <p class="meta">Saved only in this browser and sent only to api.github.com.</p>
+  </form>
+
+  <section id="app" hidden>
+    <div class="tabs" id="tabs"></div>
+    <div id="card"></div>
+  </section>
+  <p id="status" class="status" role="status"></p>
+</main>
+<div class="actions" id="actions" hidden><div>
+  <button id="prev">Back</button>
+  <button id="fix">Needs fix</button>
+  <button id="approve" class="primary">Approve</button>
+  <button id="next">Skip</button>
+</div></div>
+
+<script>
+"use strict";
+const OWNER = "dr-nithish-kanna";
+const REPO = "pulse";
+const BRANCH = "main";
+const API = `https://api.github.com/repos/${OWNER}/${REPO}/contents/`;
+const TOKEN_KEY = "pulse_token";
+const NUMBER = /\d|\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i;
+const FILTERS = [["draft", "Pending"], ["needs_review", "Flagged"], ["approved", "Approved"]];
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text; // textContent, so card text can never run as code
+  return n;
+};
+const store = {
+  get() { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } },
+  set(v) { try { localStorage.setItem(TOKEN_KEY, v); } catch {} },
+  clear() { try { localStorage.removeItem(TOKEN_KEY); } catch {} },
+};
+
+let token = null;
+let cards = [];        // { card, file }
+let assessments = [];
+let filter = "draft";
+let index = 0;
+let shownImage = null;
+let renderId = 0;
+
+function setStatus(message, isError = false) {
+  $("status").textContent = message;
+  $("status").className = isError ? "status error" : "status";
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(API + path, {
+    ...options,
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", ...options.headers },
+  });
+  if (!res.ok) {
+    const err = new Error(`GitHub error ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+const getJson = async (path) => (await api(path)).json();
+const pathUrl = (path) => path.split("/").map(encodeURIComponent).join("/");
+const getRaw = (path) =>
+  api(`${pathUrl(path)}?ref=${BRANCH}`, { headers: { Accept: "application/vnd.github.raw+json" } });
+
+const decode = (b64) =>
+  new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\n/g, "")), (c) => c.charCodeAt(0)));
+const encode = (text) => {
+  let bin = "";
+  new TextEncoder().encode(text).forEach((b) => { bin += String.fromCharCode(b); });
+  return btoa(bin);
+};
+
+async function loadList(dir) {
+  const files = (await getJson(`content/${dir}?ref=${BRANCH}`)).filter((f) => f.name.endsWith(".json"));
+  const lists = await Promise.all(files.map(async (f) => ({
+    path: f.path,
+    items: await (await getRaw(f.path)).json(),
+  })));
+  return lists.flatMap((l) => l.items.map((item) => ({ item, file: l.path })));
+}
+
+async function loadAll() {
+  setStatus("Loading cards...");
+  const [c, a] = await Promise.all([loadList("cards"), loadList("assessments")]);
+  cards = c.map(({ item, file }) => ({ card: item, file }))
+    .sort((x, y) => Boolean(y.card.source?.[0]?.page) - Boolean(x.card.source?.[0]?.page));
+  assessments = a.map((x) => x.item);
+  setStatus("");
+  $("gate").hidden = true;
+  $("app").hidden = false;
+  $("forget").hidden = false;
+  render();
+}
+
+const visible = () => cards.filter((c) => c.card.status === filter);
+
+function renderTabs() {
+  const tabs = $("tabs");
+  tabs.replaceChildren(...FILTERS.map(([value, label]) => {
+    const b = el("button", "", `${label} ${cards.filter((c) => c.card.status === value).length}`);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(filter === value));
+    b.onclick = () => { filter = value; index = 0; render(); };
+    return b;
+  }));
+}
+
+async function loadEvidence(id, box, thisRender) {
+  let evidence;
+  try {
+    evidence = await (await getRaw(`sources/evidence/${id}.json`)).json();
+  } catch (e) {
+    if (thisRender !== renderId) return;
+    box.className = "evidence none";
+    box.textContent = e.status === 404 ? "No evidence file" : "Could not load evidence";
+    return;
+  }
+  if (thisRender !== renderId) return;
+  box.className = "evidence";
+  const line = el("div");
+  line.append(el("strong", "", `Page ${evidence.page}: `), evidence.locator ?? "");
+  box.replaceChildren(line);
+  if (evidence.phrase) box.append(el("blockquote", "", evidence.phrase));
+  if (!evidence.image) return;
+
+  const waiting = el("div", "meta", "Loading textbook page...");
+  box.append(waiting);
+  try {
+    const blob = await (await getRaw(evidence.image)).blob();
+    if (thisRender !== renderId) return;
+    const url = URL.createObjectURL(blob);
+    if (shownImage) URL.revokeObjectURL(shownImage);
+    shownImage = url;
+    if (evidence.image.toLowerCase().endsWith(".pdf")) {
+      const open = el("a", "", "Open the PDF page");
+      open.href = url;
+      open.target = "_blank";
+      open.rel = "noopener";
+      waiting.replaceWith(open);
+    } else {
+      const img = el("img");
+      img.alt = `Textbook page ${evidence.page}`;
+      img.src = url;
+      waiting.replaceWith(img);
+    }
+  } catch {
+    if (thisRender === renderId) waiting.textContent = "Could not load the textbook page";
+  }
+}
+
+function render() {
+  const thisRender = ++renderId;
+  renderTabs();
+  const list = visible();
+  index = Math.max(0, Math.min(index, list.length - 1));
+  const root = $("card");
+  if (!list.length) {
+    root.replaceChildren(el("p", "status", "Nothing here."));
+    $("actions").hidden = true;
+    return;
+  }
+  const { card } = list[index];
+  const article = el("article");
+  const top = el("div", "top");
+  top.append(el("span", "", `${index + 1} of ${list.length}`), el("code", "", card.id));
+  if (NUMBER.test(`${card.text} ${card.answer ?? ""}`)) top.append(el("span", "badge", "number"));
+  article.append(top, el("p", "text", card.text));
+  if (card.answer) article.append(el("div", "meta", `Answer: ${card.answer}`));
+  const source = (card.source ?? [])
+    .map((s) => [s.book, s.chapter, s.page && `p. ${s.page}`].filter(Boolean).join(", ")).join("; ");
+  article.append(el("div", "meta", `Source: ${source}`));
+  if (card.review_note) article.append(el("div", "note", `Note: ${card.review_note}`));
+
+  const box = el("div", "evidence none", "Loading evidence...");
+  article.append(box);
+  for (const a of assessments.filter((x) => x.card_id === card.id)) {
+    const row = el("div", "asmt");
+    row.append(el("strong", "", `${a.kind}: `), a.prompt);
+    row.append(el("div", "meta", `Correct: ${a.correct.join(" / ")}`));
+    if (a.distractors) row.append(el("div", "meta", `Wrong: ${a.distractors.join(", ")}`));
+    article.append(row);
+  }
+  root.replaceChildren(article);
+  $("actions").hidden = false;
+  $("approve").disabled = card.status === "approved";
+  $("fix").disabled = false;
+  $("prev").disabled = index === 0;
+  $("next").disabled = index >= list.length - 1;
+  window.scrollTo(0, 0);
+  loadEvidence(card.id, box, thisRender);
+}
+
+// Always re-reads the file, so a save never overwrites newer work. Retries if two saves collide.
+async function saveCard(entry, change, message) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const meta = await getJson(`${pathUrl(entry.file)}?ref=${BRANCH}`);
+    const content = meta.content
+      ? decode(meta.content)
+      : await (await getRaw(entry.file)).text();
+    const list = JSON.parse(content);
+    const fresh = list.find((c) => c.id === entry.card.id);
+    if (!fresh) throw new Error("This card no longer exists. Reload the page.");
+    change(fresh);
+    try {
+      await api(pathUrl(entry.file), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          branch: BRANCH,
+          sha: meta.sha,
+          content: encode(JSON.stringify(list, null, 2) + "\n"),
+        }),
+      });
+      Object.assign(entry.card, fresh);
+      return;
+    } catch (e) {
+      if ((e.status !== 409 && e.status !== 422) || attempt === 2) throw e;
+    }
+  }
+}
+
+async function act(change, message, done) {
+  const entry = visible()[index];
+  const buttons = ["approve", "fix", "prev", "next"].map($);
+  buttons.forEach((b) => { b.disabled = true; });
+  setStatus("Saving...");
+  try {
+    await saveCard(entry, change, message);
+    setStatus(done);
+  } catch (e) {
+    setStatus(`Not saved: ${e.message}`, true);
+  }
+  render();
+}
+
+$("approve").onclick = () => {
+  const { card } = visible()[index];
+  act((c) => { c.status = "approved"; }, `Approve ${card.id}`, "Approved");
+};
+
+$("fix").onclick = () => {
+  const { card } = visible()[index];
+  const note = prompt("What needs fixing?");
+  if (!note || !note.trim()) return;
+  act((c) => {
+    c.status = "needs_review";
+    c.review_note = [c.review_note, `fix: ${note.trim()}`].filter(Boolean).join("; ");
+  }, `Flag ${card.id} for a fix`, "Marked for fixing");
+};
+
+$("prev").onclick = () => { index--; render(); };
+$("next").onclick = () => { index++; render(); };
+
+function start() {
+  loadAll().catch((e) => {
+    const bad = e.status === 401 || e.status === 403 || e.status === 404;
+    if (bad) { store.clear(); token = null; }
+    setStatus(bad ? "GitHub refused that token. Check it can read and write the pulse repo." : e.message, true);
+    $("gate").hidden = false;
+  });
+}
+
+$("gate").onsubmit = (event) => {
+  event.preventDefault();
+  token = $("token").value.trim();
+  $("token").value = "";
+  store.set(token);
+  start();
+};
+
+$("forget").onclick = () => {
+  store.clear();
+  location.reload();
+};
+
+token = store.get();
+if (token) start(); else $("gate").hidden = false;
+</script>
+</body>
+</html>
