@@ -114,11 +114,13 @@ function setStatus(message, isError = false) {
 
 async function api(path, options = {}) {
   const res = await fetch(API + path, {
+    cache: "no-store", // never reuse an old copy: a stale file version makes saves fail
     ...options,
     headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", ...options.headers },
   });
   if (!res.ok) {
-    const err = new Error(`GitHub error ${res.status}`);
+    const detail = await res.json().then((j) => j.message, () => "");
+    const err = new Error(`GitHub error ${res.status}${detail ? `: ${detail}` : ""}`);
     err.status = res.status;
     throw err;
   }
@@ -332,6 +334,7 @@ async function saveCard(entry, change, message) {
       return;
     } catch (e) {
       if ((e.status !== 409 && e.status !== 422) || attempt === 2) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1))); // let GitHub catch up, then re-read
     }
   }
 }
