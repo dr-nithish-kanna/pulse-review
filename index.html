@@ -139,9 +139,11 @@ async function loadList(dir) {
 async function loadAll() {
   setStatus("Loading cards...");
   const [c, a] = await Promise.all([loadList("cards"), loadList("assessments")]);
-  cards = c.map(({ item, file }) => ({ card: item, file }))
-    .sort((x, y) => Boolean(y.card.source?.[0]?.page) - Boolean(x.card.source?.[0]?.page));
   assessments = a; // { item, file }
+  // Cards that already have questions come first, so card and questions are reviewed together.
+  const withQuestions = new Set(a.filter((x) => x.item.status !== "retired").map((x) => x.item.card_id));
+  const rank = (e) => (withQuestions.has(e.card.id) ? 2 : 0) + (e.card.source?.[0]?.page ? 1 : 0);
+  cards = c.map(({ item, file }) => ({ card: item, file })).sort((x, y) => rank(y) - rank(x));
   setStatus("");
   $("gate").hidden = true;
   $("app").hidden = false;
