@@ -103,12 +103,16 @@ function setStatus(message, isError = false) {
 }
 
 async function api(path, options = {}) {
+  // no-store: GitHub replies can be cached for 60 s, which gives a stale sha and a failed save.
   const res = await fetch(API + path, {
+    cache: "no-store",
     ...options,
     headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", ...options.headers },
   });
   if (!res.ok) {
-    const err = new Error(`GitHub error ${res.status}`);
+    let detail = "";
+    try { detail = (await res.json()).message ?? ""; } catch {}
+    const err = new Error(`GitHub error ${res.status}${detail ? `: ${detail}` : ""}`);
     err.status = res.status;
     throw err;
   }
@@ -287,6 +291,7 @@ async function saveItems(file, changes, message) {
       return fresh;
     } catch (e) {
       if ((e.status !== 409 && e.status !== 422) || attempt === 2) throw e;
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 }
