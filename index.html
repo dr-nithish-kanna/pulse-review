@@ -13,9 +13,6 @@ body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui
 main { max-width:680px; margin:0 auto; padding:16px 16px 96px; }
 h1 { font-size:20px; margin:0; }
 .bar { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
-.pick { display:flex; gap:8px; margin-bottom:12px; }
-.pick label { flex:1; font-size:13px; color:var(--muted); }
-.pick select { display:block; width:100%; min-height:44px; margin-top:4px; padding:6px 8px; font:inherit; font-size:15px; color:var(--ink); background:var(--panel); border:1px solid var(--line); border-radius:8px; }
 .tabs { display:flex; gap:6px; margin-bottom:12px; }
 .tabs button { flex:1; min-height:44px; padding:6px 4px; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; }
 .tabs button[aria-pressed="true"] { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
@@ -30,6 +27,8 @@ code { overflow-wrap:anywhere; }
 .evidence.none { background:none; border-left-color:var(--line); color:var(--muted); }
 blockquote { margin:6px 0 0; font-style:italic; }
 img { display:block; width:100%; height:auto; margin-top:12px; border:1px solid var(--line); border-radius:4px; }
+.asmt .badge { margin-left:8px; }
+.asmt button { margin-top:6px; padding:6px 10px; font-size:13px; }
 .asmt { font-size:14px; border-top:1px solid var(--line); padding:8px 0; }
 .actions { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line); padding:10px 16px; }
 .actions div { display:flex; gap:8px; max-width:648px; margin:0 auto; }
@@ -55,10 +54,6 @@ input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:va
   </form>
 
   <section id="app" hidden>
-    <div class="pick">
-      <label>Subject<select id="subject"></select></label>
-      <label>Chapter<select id="chapter"></select></label>
-    </div>
     <div class="tabs" id="tabs"></div>
     <div id="card"></div>
   </section>
@@ -78,8 +73,6 @@ const REPO = "pulse";
 const BRANCH = "main";
 const API = `https://api.github.com/repos/${OWNER}/${REPO}/contents/`;
 const TOKEN_KEY = "pulse_token";
-const PICK_KEY = "pulse_pick"; // remembers subject + chapter in this browser only
-const ALL = "";
 const NUMBER = /\d|\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i;
 const FILTERS = [["draft", "Pending"], ["needs_review", "Flagged"], ["approved", "Approved"]];
 
@@ -91,16 +84,13 @@ const el = (tag, cls, text) => {
   return n;
 };
 const store = {
-  get(key = TOKEN_KEY) { try { return localStorage.getItem(key); } catch { return null; } },
-  set(v, key = TOKEN_KEY) { try { localStorage.setItem(key, v); } catch {} },
+  get() { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } },
+  set(v) { try { localStorage.setItem(TOKEN_KEY, v); } catch {} },
   clear() { try { localStorage.removeItem(TOKEN_KEY); } catch {} },
 };
 
 let token = null;
-let cards = [];        // { card, file, subject, chapter }
-let topics = new Map(); // topic id -> topic
-let subject = ALL;
-let chapter = ALL;
+let cards = [];        // { card, file }
 let assessments = [];
 let filter = "draft";
 let index = 0;
@@ -114,13 +104,11 @@ function setStatus(message, isError = false) {
 
 async function api(path, options = {}) {
   const res = await fetch(API + path, {
-    cache: "no-store", // never reuse an old copy: a stale file version makes saves fail
     ...options,
     headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", ...options.headers },
   });
   if (!res.ok) {
-    const detail = await res.json().then((j) => j.message, () => "");
-    const err = new Error(`GitHub error ${res.status}${detail ? `: ${detail}` : ""}`);
+    const err = new Error(`GitHub error ${res.status}`);
     err.status = res.status;
     throw err;
   }
@@ -148,28 +136,12 @@ async function loadList(dir) {
   return lists.flatMap((l) => l.items.map((item) => ({ item, file: l.path })));
 }
 
-// Subject = top of the topic tree (e.g. Medicine, Pathology). Chapter = the level below it (e.g. Cardiology).
-function placeOf(card) {
-  const chain = [];
-  let id = card.topics?.[0]?.topic_id;
-  while (id && topics.has(id) && !chain.includes(id)) {
-    chain.unshift(id);
-    id = topics.get(id).parent_id;
-  }
-  if (!chain.length) return { subject: "?", chapter: "?" };
-  return { subject: chain[0], chapter: chain[1] ?? chain[0] };
-}
-const topicName = (id) => (id === "?" ? "Not in topic tree" : topics.get(id)?.name ?? id);
-const byOrder = (a, b) => (topics.get(a)?.order ?? 999) - (topics.get(b)?.order ?? 999) || topicName(a).localeCompare(topicName(b));
-
 async function loadAll() {
   setStatus("Loading cards...");
-  const [c, a, t] = await Promise.all([loadList("cards"), loadList("assessments"), loadList("topics")]);
-  topics = new Map(t.map(({ item }) => [item.id, item]));
-  cards = c.map(({ item, file }) => ({ card: item, file, ...placeOf(item) }))
+  const [c, a] = await Promise.all([loadList("cards"), loadList("assessments")]);
+  cards = c.map(({ item, file }) => ({ card: item, file }))
     .sort((x, y) => Boolean(y.card.source?.[0]?.page) - Boolean(x.card.source?.[0]?.page));
-  assessments = a.map((x) => x.item);
-  try { ({ subject = ALL, chapter = ALL } = JSON.parse(store.get(PICK_KEY)) ?? {}); } catch {}
+  assessments = a; // { item, file }
   setStatus("");
   $("gate").hidden = true;
   $("app").hidden = false;
@@ -177,44 +149,12 @@ async function loadAll() {
   render();
 }
 
-const picked = () => cards.filter((c) =>
-  (subject === ALL || c.subject === subject) && (chapter === ALL || c.chapter === chapter));
-const visible = () => picked().filter((c) => c.card.status === filter);
-
-function fillSelect(select, ids, value, allLabel) {
-  const options = [[ALL, allLabel], ...ids.map((id) => [id, topicName(id)])].map(([v, label]) => {
-    const o = el("option", "", label);
-    o.value = v;
-    return o;
-  });
-  select.replaceChildren(...options);
-  select.value = value;
-}
-
-function renderPickers() {
-  const subjects = [...new Set(cards.map((c) => c.subject))].sort(byOrder);
-  if (!subjects.includes(subject)) subject = ALL;
-  const chapters = [...new Set(cards.filter((c) => subject === ALL || c.subject === subject).map((c) => c.chapter))].sort(byOrder);
-  if (!chapters.includes(chapter)) chapter = ALL;
-  fillSelect($("subject"), subjects, subject, "All subjects");
-  fillSelect($("chapter"), chapters, chapter, "All chapters");
-}
-
-function pick(newSubject, newChapter) {
-  subject = newSubject;
-  chapter = newChapter;
-  store.set(JSON.stringify({ subject, chapter }), PICK_KEY);
-  index = 0;
-  render();
-}
-$("subject").onchange = (e) => pick(e.target.value, ALL);
-$("chapter").onchange = (e) => pick(subject, e.target.value);
+const visible = () => cards.filter((c) => c.card.status === filter);
 
 function renderTabs() {
   const tabs = $("tabs");
-  const pool = picked();
   tabs.replaceChildren(...FILTERS.map(([value, label]) => {
-    const b = el("button", "", `${label} ${pool.filter((c) => c.card.status === value).length}`);
+    const b = el("button", "", `${label} ${cards.filter((c) => c.card.status === value).length}`);
     b.type = "button";
     b.setAttribute("aria-pressed", String(filter === value));
     b.onclick = () => { filter = value; index = 0; render(); };
@@ -267,7 +207,6 @@ async function loadEvidence(id, box, thisRender) {
 
 function render() {
   const thisRender = ++renderId;
-  renderPickers();
   renderTabs();
   const list = visible();
   index = Math.max(0, Math.min(index, list.length - 1));
@@ -291,11 +230,19 @@ function render() {
 
   const box = el("div", "evidence none", "Loading evidence...");
   article.append(box);
-  for (const a of assessments.filter((x) => x.card_id === card.id)) {
+  for (const entry of assessments.filter((x) => x.item.card_id === card.id)) {
+    const a = entry.item;
     const row = el("div", "asmt");
-    row.append(el("strong", "", `${a.kind}: `), a.prompt);
+    row.append(el("strong", "", `${a.kind}: `), a.prompt, el("span", "badge", a.status));
     row.append(el("div", "meta", `Correct: ${a.correct.join(" / ")}`));
     if (a.distractors) row.append(el("div", "meta", `Wrong: ${a.distractors.join(", ")}`));
+    if (a.explanation) row.append(el("div", "meta", `Why: ${a.explanation}`));
+    if (a.status !== "retired") {
+      const drop = el("button", "", "Drop this question");
+      drop.type = "button";
+      drop.onclick = () => dropAssessment(entry);
+      row.append(drop);
+    }
     article.append(row);
   }
   root.replaceChildren(article);
@@ -309,18 +256,23 @@ function render() {
 }
 
 // Always re-reads the file, so a save never overwrites newer work. Retries if two saves collide.
-async function saveCard(entry, change, message) {
+// `changes` maps item id -> function that edits that item.
+async function saveItems(file, changes, message) {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const meta = await getJson(`${pathUrl(entry.file)}?ref=${BRANCH}`);
+    const meta = await getJson(`${pathUrl(file)}?ref=${BRANCH}`);
     const content = meta.content
       ? decode(meta.content)
-      : await (await getRaw(entry.file)).text();
+      : await (await getRaw(file)).text();
     const list = JSON.parse(content);
-    const fresh = list.find((c) => c.id === entry.card.id);
-    if (!fresh) throw new Error("This card no longer exists. Reload the page.");
-    change(fresh);
+    const fresh = new Map();
+    for (const [id, change] of changes) {
+      const item = list.find((c) => c.id === id);
+      if (!item) throw new Error("An item no longer exists. Reload the page.");
+      change(item);
+      fresh.set(id, item);
+    }
     try {
-      await api(pathUrl(entry.file), {
+      await api(pathUrl(file), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -330,22 +282,55 @@ async function saveCard(entry, change, message) {
           content: encode(JSON.stringify(list, null, 2) + "\n"),
         }),
       });
-      Object.assign(entry.card, fresh);
-      return;
+      return fresh;
     } catch (e) {
       if ((e.status !== 409 && e.status !== 422) || attempt === 2) throw e;
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1))); // let GitHub catch up, then re-read
     }
   }
 }
 
-async function act(change, message, done) {
+async function saveCard(entry, change, message) {
+  const fresh = await saveItems(entry.file, new Map([[entry.card.id, change]]), message);
+  Object.assign(entry.card, fresh.get(entry.card.id));
+}
+
+// Approving a card also approves its draft questions (one tap). Questions already
+// flagged needs_review or retired are left alone.
+async function approveDraftAssessments(card) {
+  const byFile = new Map();
+  for (const entry of assessments) {
+    if (entry.item.card_id !== card.id || entry.item.status !== "draft") continue;
+    if (!byFile.has(entry.file)) byFile.set(entry.file, []);
+    byFile.get(entry.file).push(entry);
+  }
+  for (const [file, entries] of byFile) {
+    const changes = new Map(entries.map((e) => [e.item.id, (a) => { a.status = "approved"; }]));
+    const fresh = await saveItems(file, changes, `Approve questions for ${card.id}`);
+    for (const e of entries) Object.assign(e.item, fresh.get(e.item.id));
+  }
+}
+
+async function dropAssessment(entry) {
+  if (!confirm("Drop this question? It will be retired, not deleted.")) return;
+  setStatus("Saving...");
+  try {
+    const fresh = await saveItems(entry.file, new Map([[entry.item.id, (a) => { a.status = "retired"; }]]), `Retire ${entry.item.id}`);
+    Object.assign(entry.item, fresh.get(entry.item.id));
+    setStatus("Question dropped");
+  } catch (e) {
+    setStatus(`Not saved: ${e.message}`, true);
+  }
+  render();
+}
+
+async function act(change, message, done, after) {
   const entry = visible()[index];
   const buttons = ["approve", "fix", "prev", "next"].map($);
   buttons.forEach((b) => { b.disabled = true; });
   setStatus("Saving...");
   try {
     await saveCard(entry, change, message);
+    if (after) await after();
     setStatus(done);
   } catch (e) {
     setStatus(`Not saved: ${e.message}`, true);
@@ -355,7 +340,7 @@ async function act(change, message, done) {
 
 $("approve").onclick = () => {
   const { card } = visible()[index];
-  act((c) => { c.status = "approved"; }, `Approve ${card.id}`, "Approved");
+  act((c) => { c.status = "approved"; }, `Approve ${card.id}`, "Approved", () => approveDraftAssessments(card));
 };
 
 $("fix").onclick = () => {
