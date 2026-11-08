@@ -44,6 +44,11 @@ code { overflow-wrap:anywhere; }
 blockquote { margin:6px 0 0; font-style:italic; }
 img { display:block; width:100%; height:auto; margin-top:12px; border:1px solid var(--line); border-radius:4px; }
 .asmt .badge { margin-left:8px; }
+.fig { margin:12px 0; }
+.fig img { margin-top:0; background:#fff; }
+.fig .meta { margin-top:4px; }
+.asmt .fig img { max-width:420px; }
+.foot { font-size:13px; color:var(--muted); border-top:1px dashed var(--line); padding-top:6px; margin:8px 0; }
 .asmt button { margin-top:6px; padding:6px 10px; font-size:13px; }
 .asmt { font-size:14px; border-top:1px solid var(--line); padding:8px 0; }
 .actions { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line); padding:10px 16px; }
@@ -129,6 +134,10 @@ let assessments = [];
 let filter = "draft";
 let index = 0;
 let shownImage = null;
+let images = new Map();   // image id -> { item, file }   (content/images/images.json)
+let glossary = { list: [], ignore: new Set() }; // content/abbreviations.json, for card footnotes
+const svgUrls = new Map(); // image file -> blob URL (drawn as <img>, so an SVG can never run code)
+const IMAGES_FILE = "content/images/images.json";
 let renderId = 0;
 
 function setStatus(message, isError = false) {
@@ -189,6 +198,11 @@ const byOrder = (a, b) => (topics.get(a)?.order ?? 999) - (topics.get(b)?.order 
 async function loadAll() {
   setStatus("Loading cards...");
   const [c, a, t] = await Promise.all([loadList("cards"), loadList("assessments"), loadList("topics")]);
+  // Pictures and abbreviations (Cardiology pilot). Missing files just mean none yet.
+  const optional = async (path, fallback) => { try { return await (await getRaw(path)).json(); } catch { return fallback; } };
+  const [imgs, abbr, ignore] = await Promise.all([optional(IMAGES_FILE, []), optional("content/abbreviations.json", []), optional("content/abbreviations_ignore.json", { words: [] })]);
+  images = new Map(imgs.map((item) => [item.id, { item, file: IMAGES_FILE }]));
+  glossary = { list: [...abbr].sort((x, y) => y.abbr.length - x.abbr.length), ignore: new Set(ignore.words) };
   topics = new Map(t.map(({ item }) => [item.id, item]));
   assessments = a; // { item, file }
   // Cards that already have questions come first, so card and questions are reviewed together.
@@ -311,6 +325,42 @@ async function showPage(evidence, button, thisRender) {
   }
 }
 
+// Footnote: the abbreviations a card uses, from the shared list (same rules as tools/lib/abbreviations.mjs in pulse).
+function footnoteOf(text) {
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const hits = [];
+  for (const e of glossary.list) {
+    const re = new RegExp(`(?<![A-Za-z0-9])${esc(e.abbr)}${e.prefix ? "(\\d+)" : "s?"}(?![A-Za-z0-9])`, "g");
+    const skip = e.skip ? new RegExp(e.skip) : null;
+    for (const m of text.matchAll(re)) {
+      if (skip && skip.test(text.slice(Math.max(0, m.index - 12), m.index + m[0].length + 1))) continue;
+      if (hits.some((h) => m.index < h.end && h.at < m.index + m[0].length)) continue; // longer entry already matched here
+      hits.push({ at: m.index, end: m.index + m[0].length, abbr: e.prefix ? e.abbr + m[1] : e.abbr, full: e.prefix ? `${e.full} ${m[1]}` : e.full });
+    }
+  }
+  const seen = new Set();
+  return hits.sort((x, y) => x.at - y.at).filter((h) => !seen.has(h.abbr) && seen.add(h.abbr));
+}
+
+// A picture with its status badge (and caption on the card itself). Loaded on demand from the private repo.
+function figureOf(imageId, withCaption, thisRender) {
+  const entry = images.get(imageId);
+  const box = el("div", "fig");
+  if (!entry) { box.append(el("div", "meta", `Picture ${imageId} not found`)); return box; }
+  const img = el("img");
+  img.alt = entry.item.alt;
+  const info = el("div", "meta");
+  info.append(el("span", "badge", `picture ${entry.item.status}`), " ", withCaption ? entry.item.caption ?? "" : "");
+  box.append(img, info);
+  const file = entry.item.file;
+  (svgUrls.has(file) ? Promise.resolve(svgUrls.get(file)) : getRaw(`content/images/${file}`).then((r) => r.text()).then((svg) => {
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    svgUrls.set(file, url);
+    return url;
+  })).then((url) => { if (thisRender === renderId) img.src = url; }, () => { info.prepend("Could not load picture. "); });
+  return box;
+}
+
 function render() {
   const thisRender = ++renderId;
   renderPickers();
@@ -330,7 +380,15 @@ function render() {
   top.append(el("span", `badge tier-${card.review_tier ?? "none"}`, tierLabel(card.review_tier)));
   if (card.more_questions) top.append(el("span", "badge more", `${card.more_questions.count ?? "More"} more questions requested`));
   if (NUMBER.test(`${card.text} ${card.answer ?? ""}`)) top.append(el("span", "badge", "number"));
+  if (card.status === "approved" && draftExtras(card)) top.append(el("span", "badge more", `${draftExtras(card)} new to approve`));
   article.append(top, el("p", "text", card.text));
+  if (card.image) article.append(figureOf(card.image, true, thisRender));
+  const foot = footnoteOf([card.text, card.explanation, card.mnemonic, images.get(card.image)?.item.caption].filter(Boolean).join("\n"));
+  if (foot.length) {
+    const f = el("div", "foot");
+    foot.forEach((x, i) => { if (i) f.append("  \u00b7  "); f.append(el("b", "", x.abbr), `: ${x.full}`); });
+    article.append(f);
+  }
   if (card.answer) article.append(el("div", "meta", `Answer: ${card.answer}`));
   const source = (card.source ?? [])
     .map((s) => [s.book, s.chapter, s.page && `p. ${s.page}`].filter(Boolean).join(", ")).join("; ");
@@ -343,6 +401,7 @@ function render() {
   for (const entry of assessments.filter((x) => x.item.card_id === card.id)) {
     const a = entry.item;
     const row = el("div", "asmt");
+    if (a.image) row.append(figureOf(a.image, false, thisRender));
     row.append(el("span", "badge kind", KIND_LABEL[a.kind] ?? a.kind), a.prompt, el("span", "badge", a.status));
     row.append(el("div", "meta", `Correct: ${a.correct.join(" / ")}`));
     if (a.distractors) row.append(el("div", "meta", `Wrong: ${a.distractors.join(", ")}`));
@@ -385,7 +444,10 @@ function render() {
   article.append(tools);
   root.replaceChildren(article);
   $("actions").hidden = false;
-  $("approve").disabled = card.status === "approved";
+  // An approved card can still have new draft questions or pictures (e.g. image questions added later).
+  const extras = draftExtras(card);
+  $("approve").disabled = card.status === "approved" && !extras;
+  $("approve").textContent = card.status === "approved" && extras ? `Approve ${extras} new` : "Approve";
   $("fix").disabled = false;
   $("prev").disabled = index === 0;
   $("next").disabled = index >= list.length - 1;
@@ -517,12 +579,25 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden" && queue.size) { clearTimeout(flushTimer); flushTimer = null; flush(); }
 });
 
-// Approving a card also approves its draft questions (one tap). Questions already
-// flagged needs_review or retired are left alone.
+/** Draft questions and draft pictures belonging to a card. */
+function draftExtras(card) {
+  const qs = assessments.filter((e) => e.item.card_id === card.id && e.item.status === "draft");
+  const pics = new Set([card.image, ...qs.map((e) => e.item.image)].filter((id) => images.get(id)?.item.status === "draft"));
+  return qs.length + pics.size;
+}
+
+// Approving a card also approves its draft questions and draft pictures (the card's own and those of
+// the questions approved with it). Anything flagged needs_review or retired is left alone.
 function approveDraftAssessments(card) {
+  const pictures = new Set(card.image ? [card.image] : []);
   for (const entry of assessments) {
     if (entry.item.card_id !== card.id || entry.item.status !== "draft") continue;
     enqueue(entry.file, entry.item, (a) => { a.status = "approved"; }, `Approve question ${entry.item.id}`);
+    if (entry.item.image) pictures.add(entry.item.image);
+  }
+  for (const id of pictures) {
+    const entry = images.get(id);
+    if (entry && entry.item.status === "draft") enqueue(entry.file, entry.item, (i) => { i.status = "approved"; }, `Approve picture ${id}`);
   }
 }
 
@@ -542,6 +617,12 @@ function act(change, message, done, after) {
 
 $("approve").onclick = () => {
   const { card } = visible()[index];
+  if (card.status === "approved") { // only the new questions and pictures
+    approveDraftAssessments(card);
+    setStatus("New questions and pictures approved");
+    render();
+    return;
+  }
   act((c) => { c.status = "approved"; delete c.archived_from; }, `Approve ${card.id}`, "Approved", () => approveDraftAssessments(card));
 };
 
