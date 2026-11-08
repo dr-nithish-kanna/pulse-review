@@ -27,6 +27,11 @@ code { overflow-wrap:anywhere; }
 .badge.tier-high_yield { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; }
 .badge.tier-core { background:var(--evbg); color:var(--accent); border-color:var(--accent); }
 .badge.tier-later { background:none; color:var(--muted); border-color:var(--line); }
+.morebox { width:100%; background:var(--evbg); border-radius:8px; padding:10px 12px; }
+.morebox input[type=range] { width:100%; padding:0; margin:8px 0; accent-color:var(--accent); }
+.morebox .count { font-weight:600; color:var(--ink); }
+.morebox .row { display:flex; gap:8px; }
+.morebox .row button { flex:1; }
 .badge.more { background:var(--evbg); color:var(--accent); border-color:var(--accent); }
 .badge.kind { background:var(--evbg); color:var(--accent); border-color:var(--accent); margin:0 6px 0 0; }
 .cardtools { margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
@@ -312,7 +317,7 @@ function render() {
   const top = el("div", "top");
   top.append(el("span", "", `${index + 1} of ${list.length}`), el("code", "", card.id));
   top.append(el("span", `badge tier-${card.review_tier ?? "none"}`, tierLabel(card.review_tier)));
-  if (card.more_questions !== undefined) top.append(el("span", "badge more", "More questions requested"));
+  if (card.more_questions) top.append(el("span", "badge more", `${card.more_questions.count ?? "More"} more questions requested`));
   if (NUMBER.test(`${card.text} ${card.answer ?? ""}`)) top.append(el("span", "badge", "number"));
   article.append(top, el("p", "text", card.text));
   if (card.answer) article.append(el("div", "meta", `Answer: ${card.answer}`));
@@ -320,7 +325,7 @@ function render() {
     .map((s) => [s.book, s.chapter, s.page && `p. ${s.page}`].filter(Boolean).join(", ")).join("; ");
   article.append(el("div", "meta", `Source: ${source}`));
   if (card.review_note) article.append(el("div", "note", `Note: ${card.review_note}`));
-  if (card.more_questions) article.append(el("div", "meta", `Extra questions should cover: ${card.more_questions}`));
+  if (card.more_questions?.note) article.append(el("div", "meta", `Extra questions should cover: ${card.more_questions.note}`));
 
   const box = el("div", "evidence none", "Loading evidence...");
   article.append(box);
@@ -351,9 +356,9 @@ function render() {
   tierSelect.onchange = (e) => setTier(e.target.value);
   tierPick.append(tierSelect);
   tools.append(tierPick);
-  const more = el("button", "", card.more_questions === undefined ? "More questions" : "Cancel question request");
+  const more = el("button", "", card.more_questions ? "Change question request" : "More questions");
   more.type = "button";
-  more.onclick = card.more_questions === undefined ? requestQuestions : cancelQuestions;
+  more.onclick = () => { more.hidden = true; tools.append(moreBox(card)); };
   tools.append(more);
   if (card.status === "archived") {
     const restore = el("button", "", "Restore this card");
@@ -494,11 +499,42 @@ function setTier(value) {
 
 // Marks a card for extra questions. The next question-writing session picks these up
 // (tools/question_requests.mjs in the pulse repo), writes them as drafts and clears the mark.
-function requestQuestions() {
+// Panel with a slider for how many extra questions, and an optional note.
+function moreBox(card) {
+  const box = el("div", "morebox");
+  const start = card.more_questions?.count ?? 5;
+  const label = el("div", "", "");
+  const count = el("span", "count", String(start));
+  label.append("Add ", count, " more questions");
+  const slider = el("input");
+  slider.type = "range";
+  slider.min = "1";
+  slider.max = "15";
+  slider.value = String(start);
+  slider.oninput = () => { count.textContent = slider.value; };
+  const note = el("input");
+  note.type = "text";
+  note.placeholder = "What should they cover? (optional)";
+  note.value = card.more_questions?.note ?? "";
+  const row = el("div", "row");
+  const save = el("button", "", "Save request");
+  save.type = "button";
+  save.onclick = () => requestQuestions(Number(slider.value), note.value.trim());
+  row.append(save);
+  if (card.more_questions) {
+    const cancel = el("button", "", "Remove request");
+    cancel.type = "button";
+    cancel.onclick = cancelQuestions;
+    row.append(cancel);
+  }
+  box.append(label, slider, note, row);
+  return box;
+}
+
+function requestQuestions(n, note) {
   const { card } = visible()[index];
-  const note = prompt("More questions for this card. What should they cover? (optional, leave blank for any)");
-  if (note === null) return;
-  act((c) => { c.more_questions = note.trim(); }, `Request more questions for ${card.id}`, "More questions requested");
+  act((c) => { c.more_questions = note ? { count: n, note } : { count: n }; },
+    `Request ${n} more questions for ${card.id}`, `${n} more questions requested`);
 }
 
 function cancelQuestions() {
