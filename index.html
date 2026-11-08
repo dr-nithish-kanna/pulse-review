@@ -278,8 +278,16 @@ async function loadEvidence(id, box, thisRender) {
   if (evidence.phrase) box.append(el("blockquote", "", evidence.phrase));
   if (!evidence.image) return;
 
+  // The page photo is only downloaded when asked for, to save time and data.
+  const show = el("button", "", "Load page");
+  show.type = "button";
+  box.append(show);
+  show.onclick = () => showPage(evidence, show, thisRender);
+}
+
+async function showPage(evidence, button, thisRender) {
   const waiting = el("div", "meta", "Loading textbook page...");
-  box.append(waiting);
+  button.replaceWith(waiting);
   try {
     const blob = await (await getRaw(evidence.image)).blob();
     if (thisRender !== renderId) return;
