@@ -51,6 +51,9 @@ img { display:block; width:100%; height:auto; margin-top:12px; border:1px solid 
 button { min-height:44px; }
 .actions button, .gate button { flex:1; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--ink); font:inherit; padding:8px; }
 .actions .primary, .gate button { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; }
+#sync { font-size:13px; color:var(--muted); margin-left:auto; margin-right:8px; }
+#sync.busy { color:var(--warn); }
+#sync.error { color:var(--bad); font-weight:600; }
 .link { background:none; border:none; color:var(--muted); font:inherit; font-size:14px; text-decoration:underline; padding:0 4px; }
 input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:6px; }
 .status { color:var(--muted); padding:12px 0; }
@@ -60,7 +63,7 @@ input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:va
 </head>
 <body>
 <main>
-  <div class="bar"><h1>Pulse review</h1><button id="forget" class="link" hidden>Remove token</button></div>
+  <div class="bar"><h1>Pulse review</h1><span id="sync" role="status"></span><button id="forget" class="link" hidden>Remove token</button></div>
 
   <form id="gate" class="gate" hidden>
     <label for="token">GitHub token</label>
@@ -417,52 +420,115 @@ async function saveItems(file, changes, message) {
   }
 }
 
-async function saveCard(entry, change, message) {
-  const fresh = await saveItems(entry.file, new Map([[entry.card.id, change]]), message);
-  Object.assign(entry.card, fresh.get(entry.card.id));
+// ---- Background save queue ----
+// A tap changes the card on screen at once; saves go to GitHub a moment later,
+// combined into one commit per file. Each save re-reads the file first, so it never
+// overwrites newer work.
+const queue = new Map(); // file -> { changes: Map(id -> [fn]), messages: [] }
+let flushTimer = null;
+let flushing = false;
+let retryDelay = 3000;
+
+function pendingCount() {
+  let n = 0;
+  for (const q of queue.values()) n += q.changes.size;
+  return n;
 }
+
+function showSync(error) {
+  const box = $("sync");
+  const n = pendingCount();
+  if (error) {
+    box.className = "error";
+    box.textContent = `Not saved yet (${n}), retrying`;
+  } else if (n || flushing) {
+    box.className = "busy";
+    box.textContent = `Saving ${n || ""}...`.replace("  ", " ");
+  } else {
+    box.className = "";
+    box.textContent = "All saved \u2713";
+  }
+}
+
+function enqueue(file, item, change, message) {
+  change(item); // update the screen now
+  if (!queue.has(file)) queue.set(file, { changes: new Map(), messages: [] });
+  const q = queue.get(file);
+  if (!q.changes.has(item.id)) q.changes.set(item.id, []);
+  q.changes.get(item.id).push(change);
+  q.messages.push(message);
+  scheduleFlush(2000);
+  showSync();
+}
+
+function scheduleFlush(ms) {
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => { flushTimer = null; flush(); }, ms);
+}
+
+async function flush() {
+  if (flushing || !queue.size) return;
+  flushing = true;
+  showSync();
+  let failed = false;
+  for (const [file, q] of [...queue]) {
+    queue.delete(file); // later taps start a new batch for this file
+    const changes = new Map([...q.changes].map(([id, fns]) => [id, (item) => fns.forEach((fn) => fn(item))]));
+    const message = q.messages.length === 1 ? q.messages[0]
+      : `Review page: ${q.messages.length} changes\n\n${q.messages.join("\n")}`;
+    try {
+      await saveItems(file, changes, message);
+    } catch (e) {
+      failed = true;
+      // Put the batch back in front of anything newer for the same file.
+      const newer = queue.get(file);
+      if (newer) {
+        for (const [id, fns] of newer.changes) q.changes.set(id, [...(q.changes.get(id) ?? []), ...fns]);
+        q.messages.push(...newer.messages);
+      }
+      queue.set(file, q);
+      console.error(e);
+    }
+  }
+  flushing = false;
+  if (failed) {
+    showSync(true);
+    scheduleFlush(retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 60000);
+  } else {
+    retryDelay = 3000;
+    if (queue.size) scheduleFlush(1000);
+    showSync();
+  }
+}
+
+window.addEventListener("beforeunload", (e) => {
+  if (pendingCount() || flushing) { e.preventDefault(); e.returnValue = ""; }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && queue.size) { clearTimeout(flushTimer); flushTimer = null; flush(); }
+});
 
 // Approving a card also approves its draft questions (one tap). Questions already
 // flagged needs_review or retired are left alone.
-async function approveDraftAssessments(card) {
-  const byFile = new Map();
+function approveDraftAssessments(card) {
   for (const entry of assessments) {
     if (entry.item.card_id !== card.id || entry.item.status !== "draft") continue;
-    if (!byFile.has(entry.file)) byFile.set(entry.file, []);
-    byFile.get(entry.file).push(entry);
-  }
-  for (const [file, entries] of byFile) {
-    const changes = new Map(entries.map((e) => [e.item.id, (a) => { a.status = "approved"; }]));
-    const fresh = await saveItems(file, changes, `Approve questions for ${card.id}`);
-    for (const e of entries) Object.assign(e.item, fresh.get(e.item.id));
+    enqueue(entry.file, entry.item, (a) => { a.status = "approved"; }, `Approve question ${entry.item.id}`);
   }
 }
 
-async function dropAssessment(entry) {
+function dropAssessment(entry) {
   if (!confirm("Drop this question? It will be retired, not deleted.")) return;
-  setStatus("Saving...");
-  try {
-    const fresh = await saveItems(entry.file, new Map([[entry.item.id, (a) => { a.status = "retired"; }]]), `Retire ${entry.item.id}`);
-    Object.assign(entry.item, fresh.get(entry.item.id));
-    setStatus("Question dropped");
-  } catch (e) {
-    setStatus(`Not saved: ${e.message}`, true);
-  }
+  enqueue(entry.file, entry.item, (a) => { a.status = "retired"; }, `Retire ${entry.item.id}`);
   render();
 }
 
-async function act(change, message, done, after) {
+function act(change, message, done, after) {
   const entry = visible()[index];
-  const buttons = ["approve", "fix", "prev", "next"].map($);
-  buttons.forEach((b) => { b.disabled = true; });
-  setStatus("Saving...");
-  try {
-    await saveCard(entry, change, message);
-    if (after) await after();
-    setStatus(done);
-  } catch (e) {
-    setStatus(`Not saved: ${e.message}`, true);
-  }
+  enqueue(entry.file, entry.card, change, message);
+  if (after) after();
+  setStatus(done);
   render();
 }
 
