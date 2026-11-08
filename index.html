@@ -23,7 +23,12 @@ article, .gate { background:var(--panel); border:1px solid var(--line); border-r
 .top { display:flex; flex-wrap:wrap; gap:8px; align-items:center; color:var(--muted); font-size:13px; }
 code { overflow-wrap:anywhere; }
 .badge { font-size:12px; padding:1px 8px; border-radius:999px; background:var(--warnbg); color:var(--warn); border:1px solid var(--warn); }
-.text { font-size:19px; margin:12px 0; }
+.text { font-size:19px; margin:12px 0; white-space:pre-line; }
+.badge.tier-high_yield { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; }
+.badge.tier-core { background:var(--evbg); color:var(--accent); border-color:var(--accent); }
+.badge.tier-later { background:none; color:var(--muted); border-color:var(--line); }
+.badge.kind { background:var(--evbg); color:var(--accent); border-color:var(--accent); margin:0 6px 0 0; }
+.cardtools { margin-top:12px; }
 .meta { font-size:14px; color:var(--muted); }
 .note { background:var(--warnbg); color:var(--warn); padding:8px 12px; margin:12px 0; font-size:15px; }
 .evidence { background:var(--evbg); border-left:3px solid var(--accent); padding:8px 12px; margin:12px 0; font-size:15px; }
@@ -60,6 +65,7 @@ input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:va
     <div class="pick">
       <label>Subject<select id="subject"></select></label>
       <label>Chapter<select id="chapter"></select></label>
+      <label>Tier<select id="tier"></select></label>
     </div>
     <div class="tabs" id="tabs"></div>
     <div id="card"></div>
@@ -83,7 +89,11 @@ const TOKEN_KEY = "pulse_token";
 const PICK_KEY = "pulse_pick"; // remembers subject + chapter in this browser only
 const ALL = "";
 const NUMBER = /\d|\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i;
-const FILTERS = [["draft", "Pending"], ["needs_review", "Flagged"], ["approved", "Approved"]];
+const FILTERS = [["draft", "Pending"], ["needs_review", "Flagged"], ["approved", "Approved"], ["archived", "Archived"]];
+const TIERS = [["high_yield", "High-yield"], ["core", "Core"], ["later", "Later"]];
+const TIER_RANK = { high_yield: 0, core: 1, later: 2 };
+const tierLabel = (t) => (TIERS.find(([v]) => v === t) ?? [t, t ?? "No tier"])[1];
+const KIND_LABEL = { mcq: "MCQ", fill_blank: "Fill in the blank", true_false: "True / False", recall: "Recall" };
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -103,6 +113,7 @@ let cards = [];        // { card, file, subject, chapter }
 let topics = new Map(); // topic id -> topic
 let subject = ALL;
 let chapter = ALL;
+let tier = ALL;
 let assessments = [];
 let filter = "draft";
 let index = 0;
@@ -172,9 +183,10 @@ async function loadAll() {
   // Cards that already have questions come first, so card and questions are reviewed together.
   const withQuestions = new Set(a.filter((x) => x.item.status !== "retired").map((x) => x.item.card_id));
   const rank = (e) => (withQuestions.has(e.card.id) ? 2 : 0) + (e.card.source?.[0]?.page ? 1 : 0);
+  const tierRank = (e) => TIER_RANK[e.card.review_tier] ?? 3;
   cards = c.map(({ item, file }) => ({ card: item, file, ...placeOf(item) }))
-    .sort((x, y) => rank(y) - rank(x));
-  try { ({ subject = ALL, chapter = ALL } = JSON.parse(store.get(PICK_KEY)) ?? {}); } catch {}
+    .sort((x, y) => tierRank(x) - tierRank(y) || rank(y) - rank(x)); // High-yield first
+  try { ({ subject = ALL, chapter = ALL, tier = ALL } = JSON.parse(store.get(PICK_KEY)) ?? {}); } catch {}
   setStatus("");
   $("gate").hidden = true;
   $("app").hidden = false;
@@ -183,7 +195,8 @@ async function loadAll() {
 }
 
 const picked = () => cards.filter((c) =>
-  (subject === ALL || c.subject === subject) && (chapter === ALL || c.chapter === chapter));
+  (subject === ALL || c.subject === subject) && (chapter === ALL || c.chapter === chapter) &&
+  (tier === ALL || c.card.review_tier === tier));
 const visible = () => picked().filter((c) => c.card.status === filter);
 
 function fillSelect(select, ids, value, allLabel) {
@@ -203,17 +216,26 @@ function renderPickers() {
   if (!chapters.includes(chapter)) chapter = ALL;
   fillSelect($("subject"), subjects, subject, "All subjects");
   fillSelect($("chapter"), chapters, chapter, "All chapters");
+  const options = [[ALL, "All tiers"], ...TIERS].map(([v, label]) => {
+    const o = el("option", "", label);
+    o.value = v;
+    return o;
+  });
+  $("tier").replaceChildren(...options);
+  $("tier").value = tier;
 }
 
-function pick(newSubject, newChapter) {
+function pick(newSubject, newChapter, newTier = tier) {
   subject = newSubject;
   chapter = newChapter;
-  store.set(JSON.stringify({ subject, chapter }), PICK_KEY);
+  tier = newTier;
+  store.set(JSON.stringify({ subject, chapter, tier }), PICK_KEY);
   index = 0;
   render();
 }
 $("subject").onchange = (e) => pick(e.target.value, ALL);
 $("chapter").onchange = (e) => pick(subject, e.target.value);
+$("tier").onchange = (e) => pick(subject, chapter, e.target.value);
 
 function renderTabs() {
   const tabs = $("tabs");
@@ -286,6 +308,7 @@ function render() {
   const article = el("article");
   const top = el("div", "top");
   top.append(el("span", "", `${index + 1} of ${list.length}`), el("code", "", card.id));
+  top.append(el("span", `badge tier-${card.review_tier ?? "none"}`, tierLabel(card.review_tier)));
   if (NUMBER.test(`${card.text} ${card.answer ?? ""}`)) top.append(el("span", "badge", "number"));
   article.append(top, el("p", "text", card.text));
   if (card.answer) article.append(el("div", "meta", `Answer: ${card.answer}`));
@@ -299,7 +322,7 @@ function render() {
   for (const entry of assessments.filter((x) => x.item.card_id === card.id)) {
     const a = entry.item;
     const row = el("div", "asmt");
-    row.append(el("strong", "", `${a.kind}: `), a.prompt, el("span", "badge", a.status));
+    row.append(el("span", "badge kind", KIND_LABEL[a.kind] ?? a.kind), a.prompt, el("span", "badge", a.status));
     row.append(el("div", "meta", `Correct: ${a.correct.join(" / ")}`));
     if (a.distractors) row.append(el("div", "meta", `Wrong: ${a.distractors.join(", ")}`));
     if (a.explanation) row.append(el("div", "meta", `Why: ${a.explanation}`));
@@ -311,6 +334,19 @@ function render() {
     }
     article.append(row);
   }
+  const tools = el("div", "cardtools");
+  if (card.status === "archived") {
+    const restore = el("button", "", "Restore this card");
+    restore.type = "button";
+    restore.onclick = restoreCard;
+    tools.append(restore);
+  } else {
+    const archive = el("button", "", "Archive (low yield)");
+    archive.type = "button";
+    archive.onclick = archiveCard;
+    tools.append(archive);
+  }
+  article.append(tools);
   root.replaceChildren(article);
   $("actions").hidden = false;
   $("approve").disabled = card.status === "approved";
@@ -407,7 +443,7 @@ async function act(change, message, done, after) {
 
 $("approve").onclick = () => {
   const { card } = visible()[index];
-  act((c) => { c.status = "approved"; }, `Approve ${card.id}`, "Approved", () => approveDraftAssessments(card));
+  act((c) => { c.status = "approved"; delete c.archived_from; }, `Approve ${card.id}`, "Approved", () => approveDraftAssessments(card));
 };
 
 $("fix").onclick = () => {
@@ -419,6 +455,25 @@ $("fix").onclick = () => {
     c.review_note = [c.review_note, `fix: ${note.trim()}`].filter(Boolean).join("; ");
   }, `Flag ${card.id} for a fix`, "Marked for fixing");
 };
+
+// Archive = hide a low-yield card without deleting it. Restore puts back its old status.
+function archiveCard() {
+  const { card } = visible()[index];
+  if (!confirm("Archive this card? You can restore it from the Archived tab.")) return;
+  act((c) => {
+    c.archived_from = c.status;
+    c.status = "archived";
+    c.review_note = [c.review_note, "archived from review page"].filter(Boolean).join("; ");
+  }, `Archive ${card.id}`, "Archived");
+}
+
+function restoreCard() {
+  const { card } = visible()[index];
+  act((c) => {
+    c.status = c.archived_from ?? "draft";
+    delete c.archived_from;
+  }, `Restore ${card.id}`, "Restored");
+}
 
 $("prev").onclick = () => { index--; render(); };
 $("next").onclick = () => { index++; render(); };
