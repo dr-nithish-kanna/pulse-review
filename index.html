@@ -136,7 +136,7 @@ let index = 0;
 let shownImage = null;
 let images = new Map();   // image id -> { item, file }   (content/images/images.json)
 let glossary = { list: [], ignore: new Set() }; // content/abbreviations.json, for card footnotes
-const svgUrls = new Map(); // image file -> blob URL (drawn as <img>, so an SVG can never run code)
+const svgUrls = new Map(); // image file -> blob URL (SVGs and photos drawn as <img>, so an SVG can never run code)
 const IMAGES_FILE = "content/images/images.json";
 let renderId = 0;
 
@@ -198,7 +198,7 @@ const byOrder = (a, b) => (topics.get(a)?.order ?? 999) - (topics.get(b)?.order 
 async function loadAll() {
   setStatus("Loading cards...");
   const [c, a, t] = await Promise.all([loadList("cards"), loadList("assessments"), loadList("topics")]);
-  // Pictures and abbreviations (Cardiology pilot). Missing files just mean none yet.
+  // Pictures (drawings and licensed photos) and abbreviations. Missing files just mean none yet.
   const optional = async (path, fallback) => { try { return await (await getRaw(path)).json(); } catch { return fallback; } };
   const [imgs, abbr, ignore] = await Promise.all([optional(IMAGES_FILE, []), optional("content/abbreviations.json", []), optional("content/abbreviations_ignore.json", { words: [] })]);
   images = new Map(imgs.map((item) => [item.id, { item, file: IMAGES_FILE }]));
@@ -352,9 +352,19 @@ function figureOf(imageId, withCaption, thisRender) {
   const info = el("div", "meta");
   info.append(el("span", "badge", `picture ${entry.item.status}`), " ", withCaption ? entry.item.caption ?? "" : "");
   box.append(img, info);
+  // Photos (Dermatology): show the licence credit, with a link to the Commons page.
+  const credit = entry.item.credit;
+  if (credit) {
+    const line = el("div", "meta");
+    const link = el("a", "", "source");
+    link.href = credit.source_url; link.target = "_blank"; link.rel = "noopener";
+    line.append(`Photo: ${credit.author}, ${credit.license} (`, link, ")");
+    box.append(line);
+  }
   const file = entry.item.file;
-  (svgUrls.has(file) ? Promise.resolve(svgUrls.get(file)) : getRaw(`content/images/${file}`).then((r) => r.text()).then((svg) => {
-    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+  const type = file.endsWith(".svg") ? "image/svg+xml" : file.endsWith(".png") ? "image/png" : "image/jpeg";
+  (svgUrls.has(file) ? Promise.resolve(svgUrls.get(file)) : getRaw(`content/images/${file}`).then((r) => r.blob()).then((blob) => {
+    const url = URL.createObjectURL(new Blob([blob], { type }));
     svgUrls.set(file, url);
     return url;
   })).then((url) => { if (thisRender === renderId) img.src = url; }, () => { info.prepend("Could not load picture. "); });
