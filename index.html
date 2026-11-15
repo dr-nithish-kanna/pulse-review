@@ -222,7 +222,9 @@ async function loadAll() {
 const picked = () => cards.filter((c) =>
   (subject === ALL || c.subject === subject) && (chapter === ALL || c.chapter === chapter) &&
   (tier === ALL || c.card.review_tier === tier));
-const visible = () => picked().filter((c) => c.card.status === filter);
+// Pending also lists approved cards that have new draft questions or pictures to approve.
+const inTab = (c, value) => c.card.status === value || (value === "draft" && c.card.status === "approved" && draftExtras(c.card) > 0);
+const visible = () => picked().filter((c) => inTab(c, filter));
 
 function fillSelect(select, ids, value, allLabel) {
   const options = [[ALL, allLabel], ...ids.map((id) => [id, topicName(id)])].map(([v, label]) => {
@@ -266,7 +268,7 @@ function renderTabs() {
   const tabs = $("tabs");
   const pool = picked();
   tabs.replaceChildren(...FILTERS.map(([value, label]) => {
-    const b = el("button", "", `${label} ${pool.filter((c) => c.card.status === value).length}`);
+    const b = el("button", "", `${label} ${pool.filter((c) => inTab(c, value)).length}`);
     b.type = "button";
     b.setAttribute("aria-pressed", String(filter === value));
     b.onclick = () => { filter = value; index = 0; render(); };
