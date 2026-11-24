@@ -63,6 +63,10 @@ button { min-height:44px; }
 input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:6px; }
 .status { color:var(--muted); padding:12px 0; }
 .status.error { color:var(--bad); }
+.badge.bad { background:none; color:var(--bad); border-color:var(--bad); }
+.linked { margin-top:12px; }
+.linked .evidence { margin:6px 0; }
+#modes button { min-height:48px; font-weight:600; }
 [hidden] { display:none !important; }
 </style>
 </head>
@@ -83,6 +87,7 @@ input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:va
       <label>Chapter<select id="chapter"></select></label>
       <label>Tier<select id="tier"></select></label>
     </div>
+    <div class="tabs" id="modes"></div>
     <div class="tabs" id="tabs"></div>
     <div id="card"></div>
   </section>
@@ -90,6 +95,7 @@ input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:va
 </main>
 <div class="actions" id="actions" hidden><div>
   <button id="prev">Back</button>
+  <button id="reject" hidden>Wrong image</button>
   <button id="fix">Needs fix</button>
   <button id="approve" class="primary">Approve</button>
   <button id="next">Skip</button>
@@ -139,6 +145,12 @@ let glossary = { list: [], ignore: new Set() }; // content/abbreviations.json, f
 const svgUrls = new Map(); // image file -> blob URL (SVGs and photos drawn as <img>, so an SVG can never run code)
 const IMAGES_FILE = "content/images/images.json";
 let renderId = 0;
+let mode = "cards";       // "cards" or "pictures" (review the pictures on their own)
+let picFilter = "check";
+let pending = [];         // content/images/pending.json: planned pictures that still have no image (tools/list_pending_photos.mjs)
+let cardById = new Map();
+let imageLinks = new Map(); // image id -> Set of card ids that use it (on the card or in one of its questions)
+const PIC_FILTERS = [["check", "To check"], ["approved", "Approved"], ["retired", "Rejected"], ["waiting", "Waiting for image"]];
 
 function setStatus(message, isError = false) {
   $("status").textContent = message;
@@ -200,7 +212,8 @@ async function loadAll() {
   const [c, a, t] = await Promise.all([loadList("cards"), loadList("assessments"), loadList("topics")]);
   // Pictures (drawings and licensed photos) and abbreviations. Missing files just mean none yet.
   const optional = async (path, fallback) => { try { return await (await getRaw(path)).json(); } catch { return fallback; } };
-  const [imgs, abbr, ignore] = await Promise.all([optional(IMAGES_FILE, []), optional("content/abbreviations.json", []), optional("content/abbreviations_ignore.json", { words: [] })]);
+  const [imgs, abbr, ignore, pend] = await Promise.all([optional(IMAGES_FILE, []), optional("content/abbreviations.json", []), optional("content/abbreviations_ignore.json", { words: [] }), optional("content/images/pending.json", [])]);
+  pending = pend;
   images = new Map(imgs.map((item) => [item.id, { item, file: IMAGES_FILE }]));
   glossary = { list: [...abbr].sort((x, y) => y.abbr.length - x.abbr.length), ignore: new Set(ignore.words) };
   topics = new Map(t.map(({ item }) => [item.id, item]));
@@ -211,6 +224,8 @@ async function loadAll() {
   const tierRank = (e) => TIER_RANK[e.card.review_tier] ?? 3;
   cards = c.map(({ item, file }) => ({ card: item, file, ...placeOf(item) }))
     .sort((x, y) => tierRank(x) - tierRank(y) || rank(y) - rank(x)); // High-yield first
+  cardById = new Map(cards.map((e) => [e.card.id, e]));
+  buildLinks();
   try { ({ subject = ALL, chapter = ALL, tier = ALL } = JSON.parse(store.get(PICK_KEY)) ?? {}); } catch {}
   setStatus("");
   $("gate").hidden = true;
@@ -266,6 +281,17 @@ $("tier").onchange = (e) => pick(subject, chapter, e.target.value);
 
 function renderTabs() {
   const tabs = $("tabs");
+  if (mode === "pictures") {
+    const pool = picsPicked();
+    tabs.replaceChildren(...PIC_FILTERS.map(([value, label]) => {
+      const b = el("button", "", `${label} ${pool.filter((x) => picTab(x) === value).length}`);
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(picFilter === value));
+      b.onclick = () => { picFilter = value; index = 0; render(); };
+      return b;
+    }));
+    return;
+  }
   const pool = picked();
   tabs.replaceChildren(...FILTERS.map(([value, label]) => {
     const b = el("button", "", `${label} ${pool.filter((c) => inTab(c, value)).length}`);
@@ -373,10 +399,134 @@ function figureOf(imageId, withCaption, thisRender) {
   return box;
 }
 
+
+// ---- Pictures mode: check the pictures on their own, with the card(s) they illustrate ----
+function buildLinks() {
+  imageLinks = new Map();
+  const add = (id, cardId) => { if (id) (imageLinks.get(id) ?? imageLinks.set(id, new Set()).get(id)).add(cardId); };
+  for (const e of cards) add(e.card.image, e.card.id);
+  for (const a of assessments) add(a.item.image, a.item.card_id);
+}
+function pictureItems() {
+  const items = [];
+  const place = (ids) => { const first = cardById.get(ids[0]); return { subject: first?.subject ?? "?", chapter: first?.chapter ?? "?", tier: first?.card.review_tier }; };
+  for (const [id, { item, file }] of images) {
+    const linked = [...(imageLinks.get(id) ?? [])];
+    items.push({ kind: "image", id, item, file, linked, ...place(linked) });
+  }
+  for (const p of pending) {
+    if (images.has(p.id)) continue; // a rejected picture shows under Rejected instead
+    items.push({ kind: "waiting", id: p.id, p, linked: [p.card_id], ...place([p.card_id]) });
+  }
+  return items;
+}
+const picTab = (x) => (x.kind === "waiting" ? "waiting" : x.item.status === "approved" ? "approved" : x.item.status === "retired" ? "retired" : "check");
+const picsPicked = () => pictureItems().filter((x) => (subject === ALL || x.subject === subject) && (chapter === ALL || x.chapter === chapter) && (tier === ALL || x.tier === tier));
+const visiblePics = () => picsPicked().filter((x) => picTab(x) === picFilter);
+
+function cardBox(cardId, imageId) {
+  const e = cardById.get(cardId);
+  const box = el("div", "evidence");
+  if (!e) { box.textContent = `Card ${cardId} not found`; return box; }
+  const c = e.card;
+  const head = el("div", "meta");
+  head.append(el("code", "", c.id), " ", el("span", `badge tier-${c.review_tier ?? "none"}`, tierLabel(c.review_tier)), " ", el("span", "badge", `card ${c.status}`));
+  box.append(head, el("div", "", c.text));
+  if (c.answer) box.append(el("div", "meta", `Answer: ${c.answer}`));
+  const n = assessments.filter((a) => a.item.card_id === c.id && a.item.image === imageId && a.item.status !== "retired").length;
+  if (n) box.append(el("div", "meta", `${n} question${n > 1 ? "s" : ""} ${n > 1 ? "show" : "shows"} this picture`));
+  return box;
+}
+
+function renderPictures(thisRender) {
+  const list = visiblePics();
+  index = Math.max(0, Math.min(index, list.length - 1));
+  const root = $("card");
+  $("reject").hidden = false;
+  if (!list.length) {
+    root.replaceChildren(el("p", "status", picFilter === "waiting" ? "No pictures waiting." : "Nothing here."));
+    $("actions").hidden = true;
+    return;
+  }
+  const x = list[index];
+  const article = el("article");
+  const top = el("div", "top");
+  top.append(el("span", "", `${index + 1} of ${list.length}`), el("code", "", x.id));
+  if (x.kind === "image") top.append(el("span", `badge${x.item.status === "retired" ? " bad" : ""}`, `picture ${x.item.status}`));
+  else top.append(el("span", "badge bad", "no image yet"));
+  article.append(top);
+  const must = x.kind === "image" ? x.item.alt : x.p.alt;
+  if (x.kind === "image") {
+    article.append(figureOf(x.id, true, thisRender));
+    if (x.item.review_note) article.append(el("div", "note", `Note: ${x.item.review_note}`));
+  } else {
+    article.append(el("div", "note", `Waiting for an image. ${x.p.why_missing}. Send the file named ${x.id}.jpg with its author or link and licence.`));
+  }
+  article.append(el("div", "meta", `Must show: ${must}`));
+  const linked = el("div", "linked");
+  if (!x.linked.length) linked.append(el("div", "meta", "No card uses this picture."));
+  for (const id of x.linked) linked.append(cardBox(id, x.id));
+  article.append(linked);
+  if (x.kind === "waiting") {
+    const copy = el("button", "", "Copy details");
+    copy.type = "button";
+    copy.onclick = () => {
+      const c = cardById.get(x.p.card_id)?.card;
+      const text = [`Image id: ${x.id}`, `Must show: ${x.p.alt}`, `Card: ${x.p.card_id}${c ? ` - ${c.text}` : ""}`, c?.answer ? `Answer: ${c.answer}` : ""].filter(Boolean).join("\n");
+      navigator.clipboard?.writeText(text).then(() => { copy.textContent = "Copied"; }, () => { copy.textContent = "Could not copy"; });
+    };
+    article.append(copy);
+  }
+  root.replaceChildren(article);
+  const waiting = x.kind === "waiting";
+  $("actions").hidden = false;
+  $("approve").textContent = "Approve";
+  $("approve").disabled = waiting || x.item.status === "approved";
+  $("fix").disabled = waiting;
+  $("reject").disabled = waiting || x.item.status === "retired";
+  $("prev").disabled = index === 0;
+  $("next").disabled = index >= list.length - 1;
+  window.scrollTo(0, 0);
+}
+
+function renderModes() {
+  $("modes").replaceChildren(...[["cards", "Cards"], ["pictures", "Pictures"]].map(([value, label]) => {
+    const b = el("button", "", label);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(mode === value));
+    b.onclick = () => { mode = value; index = 0; render(); };
+    return b;
+  }));
+}
+
+function picAct(change, message, done, extra) {
+  const x = visiblePics()[index];
+  if (!x || x.kind !== "image") return;
+  enqueue(x.file, x.item, change, message);
+  if (extra) extra(x);
+  buildLinks();
+  setStatus(done);
+  render();
+}
+
+$("reject").onclick = () => {
+  const x = visiblePics()[index];
+  if (!x || x.kind !== "image") return;
+  if (!confirm("Wrong image? It is rejected, its questions are retired and the card loses this picture. It goes back to the waiting list for a new image.")) return;
+  picAct((i) => { i.status = "retired"; i.review_note = [i.review_note, "rejected on review page: wrong image"].filter(Boolean).join("; "); },
+    `Reject picture ${x.id}`, "Picture rejected", (y) => {
+      for (const a of assessments) if (a.item.image === y.id && a.item.status !== "retired") enqueue(a.file, a.item, (q) => { q.status = "retired"; }, `Retire ${a.item.id} (picture rejected)`);
+      for (const c of cards) if (c.card.image === y.id) enqueue(c.file, c.card, (k) => { delete k.image; }, `Unlink picture ${y.id} from ${c.card.id}`);
+    });
+};
+
 function render() {
   const thisRender = ++renderId;
   renderPickers();
+  renderModes();
   renderTabs();
+  if (mode === "pictures") return renderPictures(thisRender);
+  $("reject").hidden = true;
   const list = visible();
   index = Math.max(0, Math.min(index, list.length - 1));
   const root = $("card");
@@ -628,6 +778,7 @@ function act(change, message, done, after) {
 }
 
 $("approve").onclick = () => {
+  if (mode === "pictures") { const x = visiblePics()[index]; if (x?.kind === "image") picAct((i) => { i.status = "approved"; }, `Approve picture ${x.id}`, "Picture approved"); return; }
   const { card } = visible()[index];
   if (card.status === "approved") { // only the new questions and pictures
     approveDraftAssessments(card);
@@ -639,6 +790,14 @@ $("approve").onclick = () => {
 };
 
 $("fix").onclick = () => {
+  if (mode === "pictures") {
+    const x = visiblePics()[index];
+    if (x?.kind !== "image") return;
+    const note = prompt("What is wrong with this picture?");
+    if (!note || !note.trim()) return;
+    picAct((i) => { i.status = "needs_review"; i.review_note = [i.review_note, `fix: ${note.trim()}`].filter(Boolean).join("; "); }, `Flag picture ${x.id} for a fix`, "Picture marked for fixing");
+    return;
+  }
   const { card } = visible()[index];
   const note = prompt("What needs fixing?");
   if (!note || !note.trim()) return;
