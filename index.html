@@ -66,6 +66,13 @@ input, textarea { width:100%; padding:10px; margin:8px 0; font:inherit; color:va
 .badge.bad { background:none; color:var(--bad); border-color:var(--bad); }
 .linked { margin-top:12px; }
 .linked .evidence { margin:6px 0; }
+.wait { border-top:1px solid var(--line); padding:12px 0; }
+.wait:first-of-type { border-top:none; }
+.wait h3 { font-size:15px; margin:4px 0; }
+.wait .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.wait .row button, .waithead button { padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--ink); font:inherit; font-size:14px; }
+article h2 { font-size:17px; margin:20px 0 4px; }
+.waithead { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
 #modes button { min-height:48px; font-weight:600; }
 [hidden] { display:none !important; }
 </style>
@@ -415,7 +422,8 @@ function pictureItems() {
     items.push({ kind: "image", id, item, file, linked, ...place(linked) });
   }
   for (const p of pending) {
-    if (images.has(p.id)) continue; // a rejected picture shows under Rejected instead
+    // A rejected picture shows under Rejected instead; a held one (needs a re-pick) is listed here too.
+    if (images.has(p.id) && p.kind !== "held") continue;
     items.push({ kind: "waiting", id: p.id, p, linked: [p.card_id], ...place([p.card_id]) });
   }
   return items;
@@ -448,6 +456,7 @@ function renderPictures(thisRender) {
     $("actions").hidden = true;
     return;
   }
+  if (picFilter === "waiting") return renderWaitingList(list, thisRender);
   const x = list[index];
   const article = el("article");
   const top = el("div", "top");
@@ -467,16 +476,6 @@ function renderPictures(thisRender) {
   if (!x.linked.length) linked.append(el("div", "meta", "No card uses this picture."));
   for (const id of x.linked) linked.append(cardBox(id, x.id));
   article.append(linked);
-  if (x.kind === "waiting") {
-    const copy = el("button", "", "Copy details");
-    copy.type = "button";
-    copy.onclick = () => {
-      const c = cardById.get(x.p.card_id)?.card;
-      const text = [`Image id: ${x.id}`, `Must show: ${x.p.alt}`, `Card: ${x.p.card_id}${c ? ` - ${c.text}` : ""}`, c?.answer ? `Answer: ${c.answer}` : ""].filter(Boolean).join("\n");
-      navigator.clipboard?.writeText(text).then(() => { copy.textContent = "Copied"; }, () => { copy.textContent = "Could not copy"; });
-    };
-    article.append(copy);
-  }
   root.replaceChildren(article);
   const waiting = x.kind === "waiting";
   $("actions").hidden = false;
@@ -487,6 +486,58 @@ function renderPictures(thisRender) {
   $("prev").disabled = index === 0;
   $("next").disabled = index >= list.length - 1;
   window.scrollTo(0, 0);
+}
+
+// "Waiting for image": every photo still to source on one page (missing ones, then ones held for a re-pick),
+// so the owner can search for them and send each file named <image id>.jpg.
+const waitingText = (x) => {
+  const c = cardById.get(x.p.card_id)?.card;
+  return [`Image id: ${x.id} (send as ${x.id}.jpg)`, `Must show: ${x.p.alt}`, x.p.caption ? `Caption: ${x.p.caption}` : "",
+    `Card: ${x.p.card_id || "none yet"}${c ? ` - ${c.text}` : ""}`, c?.answer ? `Answer: ${c.answer}` : "",
+    `${x.p.kind === "held" ? "Why held" : "Why missing"}: ${x.p.why_missing}`].filter(Boolean).join("\n");
+};
+function copyButton(label, text) {
+  const b = el("button", "", label);
+  b.type = "button";
+  b.onclick = () => navigator.clipboard?.writeText(text()).then(() => { b.textContent = "Copied"; }, () => { b.textContent = "Could not copy"; });
+  return b;
+}
+function renderWaitingList(list, thisRender) {
+  $("actions").hidden = true;
+  const article = el("article");
+  const missing = list.filter((x) => x.p.kind !== "held"), held = list.filter((x) => x.p.kind === "held");
+  const head = el("div", "waithead");
+  head.append(el("strong", "", `${list.length} photos to find: ${missing.length} missing, ${held.length} to re-pick`),
+    copyButton("Copy all", () => list.map(waitingText).join("\n\n")));
+  article.append(head, el("div", "meta", "Send each photo named <image id>.jpg with its author or link and licence (public domain, CC0, CC BY or CC BY-SA; no label or arrow naming the answer; at least 500 px wide)."));
+  const group = (title, items) => {
+    if (!items.length) return;
+    article.append(el("h2", "", `${title} (${items.length})`));
+    items.forEach((x, i) => {
+      const row = el("div", "wait");
+      const top = el("div", "top");
+      top.append(el("span", "", `${i + 1}.`), el("span", "", x.p.chapter ?? ""), el("span", x.p.kind === "held" ? "badge" : "badge bad", x.p.kind === "held" ? "held: re-pick" : "missing"));
+      row.append(top, el("h3", "", ""));
+      row.lastChild.append(el("code", "", `${x.id}.jpg`));
+      row.append(el("div", "", `Must show: ${x.p.alt}`));
+      if (x.p.caption) row.append(el("div", "meta", `Caption: ${x.p.caption}`));
+      row.append(el("div", "note", `${x.p.kind === "held" ? "Why held" : "Why missing"}: ${x.p.why_missing}`));
+      if (x.p.card_id) row.append(cardBox(x.p.card_id, x.id)); else row.append(el("div", "meta", "No card uses this picture yet."));
+      const tools = el("div", "row");
+      tools.append(copyButton("Copy details", () => waitingText(x)));
+      if (x.p.kind === "held" && images.has(x.id)) {
+        const show = el("button", "", "Show current photo");
+        show.type = "button";
+        show.onclick = () => show.replaceWith(figureOf(x.id, false, renderId));
+        tools.append(show);
+      }
+      row.append(tools);
+      article.append(row);
+    });
+  };
+  group("Missing", missing);
+  group("Held for a re-pick", held);
+  $("card").replaceChildren(article);
 }
 
 function renderModes() {
